@@ -1,6 +1,5 @@
-#include <algorithm>
 #include <iostream>
-#include <utility>
+#include <set>
 #include <vector>
 
 const long long cInf = 1e16;
@@ -228,9 +227,207 @@ std::vector<std::vector<long long>> Dijkstra(const Mission& mission,
   return res;
 }
 
+long long ReverseDijkstra(const Mission& mission, int finish,
+                          size_t finish_mask, long long deadline) {
+  size_t mask_count = 1ULL << mission.k;
+  std::vector<std::vector<long long>> res(
+      mission.n, std::vector<long long>(mask_count, -cInf));
+  deadline = std::min(deadline, mission.T_lim);
+  res[finish][finish_mask] = deadline;
+  std::vector<std::vector<bool>> expanded(
+      mission.n, std::vector<bool>(mask_count, false));
+  Heap a;
+  a.Insert(finish_mask * mission.n + finish, -deadline);
+
+  while (true) {
+    if (a.Empty()) {
+      break;
+    }
+    size_t id = a.GetMinFirst();
+    long long curr_dist = -a.GetMinSecond();
+    a.ExtractMin();
+
+    size_t v = id % mission.n;
+    size_t mask = id / mission.n;
+    if (expanded[v][mask] || curr_dist < res[v][mask]) {
+      continue;
+    }
+    expanded[v][mask] = true;
+    if (v == (size_t)mission.in && mask == 0) {
+      return curr_dist;
+    }
+
+    for (int index : mission.prev[v]) {
+      const Edge& e = mission.edge[index];
+      if ((mask & e.need) != e.need) {
+        continue;
+      }
+      long long new_dist = std::min(curr_dist, e.deadline) - e.len;
+      size_t from = e.from;
+      if (new_dist > res[from][mask]) {
+        res[from][mask] = new_dist;
+        a.Insert(mask * mission.n + from, -new_dist);
+      }
+    }
+
+    for (int index : mission.art_at[v]) {
+      size_t bit = 1ULL << index;
+      if ((mask & bit) == 0) {
+        continue;
+      }
+      const Art& art = mission.arts[index];
+      long long new_dist = std::min(curr_dist, art.to);
+      if (new_dist < art.from) {
+        continue;
+      }
+      size_t new_mask = mask ^ bit;
+      if (new_dist > res[v][new_mask]) {
+        res[v][new_mask] = new_dist;
+        a.Insert(new_mask * mission.n + v, -new_dist);
+      }
+    }
+  }
+
+  return -cInf;
+}
+
+struct Checkpoint {
+  int where;
+  size_t mask;
+  long long deadline;
+
+  bool operator<(const Checkpoint& other) const {
+    if (where != other.where) {
+      return where < other.where;
+    }
+    if (mask != other.mask) {
+      return mask < other.mask;
+    }
+    return deadline < other.deadline;
+  }
+};
+
+std::set<Checkpoint> GetCheckpoints(const Mission& mission) {
+  size_t mask_count = 1ULL << mission.k;
+  std::set<Checkpoint> checkpoints;
+
+  for (const Edge& e : mission.edge) {
+    if (e.deadline >= mission.T_lim) {
+      continue;
+    }
+    for (size_t mask = 0; mask < mask_count; ++mask) {
+      if ((mask & e.need) == e.need) {
+        checkpoints.insert({e.to, mask, e.deadline});
+      }
+    }
+  }
+
+  for (int i = 0; i < mission.k; ++i) {
+    const Art& art = mission.arts[i];
+    if (art.to >= mission.T_lim) {
+      continue;
+    }
+    size_t bit = 1ULL << i;
+    for (size_t mask = 0; mask < mask_count; ++mask) {
+      if ((mask & bit) != 0) {
+        checkpoints.insert({art.where, mask, art.to});
+      }
+    }
+  }
+
+  for (int v : mission.out) {
+    for (size_t mask = 0; mask < mask_count; ++mask) {
+      checkpoints.insert({v, mask, mission.T_lim});
+    }
+  }
+
+  return checkpoints;
+}
+
+std::set<long long> GetStartTimes(const Mission& mission) {
+  std::set<Checkpoint> checkpoints = GetCheckpoints(mission);
+  std::set<long long> starts;
+  starts.insert(0);
+
+  for (const Checkpoint& checkpoint : checkpoints) {
+    long long start_time = ReverseDijkstra(
+        mission, checkpoint.where, checkpoint.mask, checkpoint.deadline);
+    if (start_time != -cInf) {
+      starts.insert(std::min(0LL, start_time));
+    }
+  }
+
+  return starts;
+}
+
+std::vector<long long> GetValues(const Mission& mission) {
+  size_t mask_count = 1ULL << mission.k;
+  std::vector<long long> value(mask_count, 0);
+  for (size_t mask = 0; mask < mask_count; ++mask) {
+    for (int i = 0; i < mission.k; ++i) {
+      if ((mask & (1ULL << i)) != 0) {
+        value[mask] += mission.arts[i].cost;
+      }
+    }
+  }
+  return value;
+}
+
+struct Answer {
+  bool possible = false;
+  long long min_time = cInf;
+  long double max_profit = 0;
+};
+
+Answer Solve(const Mission& mission) {
+  size_t mask_count = 1ULL << mission.k;
+  std::set<long long> starts = GetStartTimes(mission);
+  std::vector<long long> best(mask_count, cInf);
+
+  for (long long start_time : starts) {
+    std::vector<std::vector<long long>> dist = Dijkstra(mission, start_time);
+    for (int v : mission.out) {
+      for (size_t mask = 0; mask < mask_count; ++mask) {
+        if (dist[v][mask] == cInf) {
+          continue;
+        }
+        long long personal_time = dist[v][mask] - 2 * start_time;
+        best[mask] = std::min(best[mask], personal_time);
+      }
+    }
+  }
+
+  std::vector<long long> value = GetValues(mission);
+  Answer answer;
+  for (size_t mask = 0; mask < mask_count; ++mask) {
+    if (best[mask] == cInf) {
+      continue;
+    }
+    double profit = value[mask] - best[mask] / mission.T_cost;
+    if (!answer.possible || profit > answer.max_profit) {
+      answer.max_profit = profit;
+    }
+    answer.min_time = std::min(answer.min_time, best[mask]);
+    answer.possible = true;
+  }
+  return answer;
+}
+
+void Output(const Answer& answer) {
+  if (!answer.possible) {
+    std::cout << "NO\n";
+    return;
+  }
+  std::cout << "YES\n";
+  std::cout << answer.min_time << '\n';
+  std::cout << answer.max_profit << '\n';
+}
+
 int main() {
   Mission mission = Input();
   Prepare(mission);
-  std::vector<std::vector<long long>> dist = Dijkstra(mission, 0);
+  Answer answer = Solve(mission);
+  Output(answer);
+
   return 0;
 }
